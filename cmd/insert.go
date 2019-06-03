@@ -15,9 +15,8 @@
 package cmd
 
 import (
-	"github.com/spf13/cobra"
 	"github.com/Fjolnir-Dvorak/manageAMQ/amq"
-	"fmt"
+	"github.com/spf13/cobra"
 )
 
 var (
@@ -41,7 +40,7 @@ to quickly create a Cobra application.`,
 func doInsertSingle(cmd *cobra.Command, args []string) {
 	err := amq.Connect(amqHost, amqUsername, amqPassword, amqPort)
 	if err != nil {
-		fmt.Println(err)
+		//fmt.Println(err)
 		return
 	}
 	amq.SendMessage(amqQueue, amqMessage)

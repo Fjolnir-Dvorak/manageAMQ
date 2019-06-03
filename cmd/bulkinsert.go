@@ -16,10 +16,10 @@ package cmd
 
 import (
 	"bufio"
-	"fmt"
 	"github.com/Fjolnir-Dvorak/manageAMQ/amq"
 	"github.com/Fjolnir-Dvorak/manageAMQ/queue"
-	"github.com/Fjolnir-Dvorak/manageAMQ/utils"
+	"github.com/Fjolnir-Dvorak/manageAMQ/ui"
+	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
 	"io"
 	"os"
@@ -51,11 +51,11 @@ to quickly create a Cobra application.`,
 }
 
 func doInsertBulk(cmd *cobra.Command, args []string) {
-	var fileList = queue.FileList{}
+	var fileList = &queue.FileList{}
 	if len(amqFiles) != 0 {
 		files, err := queue.BuildFromFileList(amqFiles)
 		if err != nil {
-			fmt.Println(err)
+			//fmt.Println(err)
 			return
 		}
 		fileList.Append(files)
@@ -63,7 +63,7 @@ func doInsertBulk(cmd *cobra.Command, args []string) {
 	if amqDir != "" {
 		files, err := queue.BuildFromDirectory(amqDir)
 		if err != nil {
-			fmt.Println(err)
+			//fmt.Println(err)
 			return
 		}
 		fileList.Append(files)
@@ -71,147 +71,92 @@ func doInsertBulk(cmd *cobra.Command, args []string) {
 
 	runner := queue.NewRunner(fileList)
 
+	runner.Waiter.Add(1)
 	go func(run *queue.ActiveRunner) {
-		for run.Running {
-			if run.Paused {
-				run.Lock()
-				run.Cond.Wait()
-				run.Unlock()
-				continue
-			}
-			err := amq.Connect(amqHost, amqUsername, amqPassword, amqPort)
+		defer runner.Waiter.Done()
+		if run.Paused {
+			<-run.Channel
+		}
+		err := amq.Connect(amqHost, amqUsername, amqPassword, amqPort)
+		if err != nil {
+			//fmt.Println(err)
+			return
+		}
+		defer amq.Disconnect()
+
+		for fileList.HasNextFile() {
+			currentFile, err := fileList.GetNextFile()
 			if err != nil {
-				fmt.Println(err)
 				return
 			}
-			fmt.Println("... Connected")
-			defer amq.Disconnect()
-
-			for fileList.HasNextFile() {
-
-				if interactive {
-					reader := bufio.NewReader(os.Stdin)
-					input, _, err := reader.ReadRune()
-					if err != nil {
-						return
-					}
-					switch input {
-					case 0x000A, 'y', 'Y':
-						fmt.Println("... reading")
-						err = helperInsertSingleFile(filename)
-						if err != nil {
-							return
-						}
-					case 'n', 'N':
-						fmt.Println("... continue")
-						continue
-					case 'a', 'A':
-						fmt.Println("... Aborting")
-						return
-					default:
-						fmt.Println("... That was no valid character. Perhaps you meant to say No...")
-						fmt.Printf("... Following character was typed: %#U\n", input)
-					}
-				} else {
-					err = helperInsertSingleFile(filename)
-					if err != nil {
-						fmt.Println("ERROR: something happened while reading file. aborting...")
-						fmt.Printf( "ERROR: %s", err)
-						return
-					}
-				}
+			err = helperInsertSingleFile(currentFile, run)
+			if err != nil {
+				//fmt.Println("ERROR: something happened while reading file. aborting...")
+				//fmt.Printf( "ERROR: %s", err)
+				return
 			}
 		}
 		return
-	}(&runner)
+	}(runner)
+
+	if amqUi {
+		ui.StartUI(runner)
+	} else {
+		runner.Paused = false
+		runner.Channel <- struct{}{}
+		runner.Waiter.Wait()
+	}
 }
 
-func helperInsertSingleFile(filename string) (err error) {
-	file, err := os.OpenFile(filename, os.O_RDONLY, os.ModePerm)
+func helperInsertSingleFile(fileContainer *queue.SingleFile, runner *queue.ActiveRunner) (err error) {
+	file, err := os.OpenFile(fileContainer.FullPath, os.O_RDONLY, os.ModePerm)
 	if err != nil {
-		fmt.Println("ERROR: Could not open file")
+		//fmt.Println("ERROR: Could not open file")
 		return err
 	}
 	defer file.Close()
-	lines, err := utils.CountLinesFromFile(file)
 	reader := bufio.NewReader(file)
-	fileinfo, err := file.Stat()
-	fileinfo.Name()
 
 	size, err := amq.GetEnqueuedCount(amqQueue, amqServicePort, amqUsername, amqPassword)
 	if err != nil {
-		fmt.Printf("ERROR: Could not get size of queue. Assuming it is empty.\n")
-		fmt.Printf("%s\n", err)
-		//Assume that the queue is empty and that there were no connection errors.
 		size = 0
 	}
-	fmt.Printf("File %s; line %d from %d. %.2f%%\n", fileinfo.Name(), 0, lines, 0.0)
-	fmt.Printf("Queue size: %d/%d\n", size, amqQueuedLimit)
 
-	lineNumber := 1
+	fileContainer.ReadingPosition = 1
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
-				fmt.Println("Finished")
+				//fmt.Println("Finished")
 				break
 			}
-			fmt.Println("ERROR: unexpected behaviour while reading file line by line")
+			//fmt.Println("ERROR: unexpected behaviour while reading file line by line")
 			return err
 		}
-		fmt.Printf("I am here\n")
-		time.Sleep(10 * time.Millisecond)
 
 		for size >= amqQueuedLimit {
-			if verbose {
-				fmt.Println("filled queue to Max. Waiting to empty...")
+			for runner.Paused {
+				<-runner.Channel
 			}
-			time.Sleep(5 * time.Second)
+			if !runner.Running {
+				return errors.New("Exited")
+			}
+			time.Sleep(2 * time.Second)
 			size, err = amq.GetEnqueuedCount(amqQueue, amqServicePort, amqUsername, amqPassword)
-			if err != nil {
-				fmt.Println("ERROR: unexpected behaviour while getting the size of the queue")
-			}
-			if verbose {
-				fmt.Printf("Queue size: %d/%d\n", size, amqQueuedLimit)
-			}
-			fmt.Printf("File %s; line %d from %d. %.2f%%\n", fileinfo.Name(), lineNumber, lines, float64(lineNumber)/float64(lines))
 		}
-
-		if verbose || interactive {
-			fmt.Printf("\n\n%d:\n%s\n", lineNumber, line)
+		for runner.Paused {
+			<-runner.Channel
 		}
-		if interactive {
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Print("Send message (yes, no, abort) (Y|n|a): ")
-			input, _, err := reader.ReadRune()
-			if err != nil {
-				fmt.Println("ERROR: Could not read character from STDIN.")
-				return err
-			}
-			switch input {
-			case 0x000A, 'y', 'Y':
-				amq.SendMessage(amqQueue, line)
-				fmt.Println("... Message send")
-			case 'n', 'N':
-				fmt.Println("... continue")
-				continue
-			case 'a', 'A':
-				fmt.Println("... Aborting")
-				return nil
-			default:
-				fmt.Println("... That was no valid character. Perhaps you meant to say No...")
-				fmt.Printf("... Following character was typed: %#U\n", input)
-			}
-
-		} else {
-			err = amq.SendMessage(amqQueue, line)
-			if err != nil {
-				fmt.Printf("Could not write message into queue.\nMessage:\n%s\n\nAborting...\n", line)
-				return err
-			}
+		if !runner.Running {
+			return errors.New("Exited")
+		}
+		err = amq.SendMessage(amqQueue, line)
+		if err != nil {
+			//fmt.Printf("Could not write message into queue.\nMessage:\n%s\n\nAborting...\n", line)
+			return err
 		}
 		size++
-		lineNumber++
+		fileContainer.ReadingPosition++
 	}
 	return nil
 }
@@ -233,4 +178,5 @@ func init() {
 		"Max limit of entries to queue at the same time.")
 	bulkinsertCmd.PersistentFlags().BoolVar(&amqUi, "ui", false,
 		"Starts a terminal ui with status informations")
+	bulkinsertCmd.Flags().MarkDeprecated()
 }

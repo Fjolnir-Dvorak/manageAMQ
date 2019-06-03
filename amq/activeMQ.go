@@ -2,6 +2,7 @@ package amq
 
 import (
 	"github.com/go-stomp/stomp"
+	"github.com/go-stomp/stomp/frame"
 	"strconv"
 	"net/http"
 	"time"
@@ -40,7 +41,7 @@ func Connect(host, username, password string, stompPort int) error {
 
 func reconnect(times int, waitBetween time.Duration) error {
 	for i := 1; i <= times; i++ {
-		fmt.Println("[AMQ] trying to reconnect...")
+		//fmt.Println("[AMQ] trying to reconnect...")
 		connection, err := stomp.Dial("tcp", srv.server + ":" + strconv.Itoa(srv.port),
 			stomp.ConnOpt.Login(srv.username, srv.password),
 			stomp.ConnOpt.AcceptVersion(stomp.V11),
@@ -60,19 +61,31 @@ func reconnect(times int, waitBetween time.Duration) error {
 	return nil
 }
 
+func recovery() {
+	if r := recover(); r != nil {
+		srv.connection = nil
+		reconnect(5,2)
+	}
+}
+
+func sendAndRecover(destination, contentType string, body []byte, opts ...func(*frame.Frame) error) error {
+	defer recovery()
+	return srv.connection.Send(destination, contentType, body, opts...)
+}
+
 func SendMessage(destination, message string) (err error) {
 	//fmt.Printf("trying to write message into queue %s: %s\n", "/queue/" + destination, message)
-	err = srv.connection.Send(destination, "text/plain", []byte(message), stomp.SendOpt.NoContentLength)
+	err = sendAndRecover(destination, "text/plain", []byte(message), stomp.SendOpt.NoContentLength)
 	if err != nil {
-		fmt.Printf("[AMQ] ERROR happened: %s\n", err)
-		err = reconnect(5, 5 * time.Second)
+		//fmt.Printf("[AMQ] ERROR happened: %s\n", err)
+		err = reconnect(5, 2 * time.Second)
 		if err != nil {
-			fmt.Printf("[AMQ] could not reconnect: %s\n", err)
+			//fmt.Printf("[AMQ] could not reconnect: %s\n", err)
 			return err
 		}
-		err = srv.connection.Send(destination, "text/plain", []byte(message), stomp.SendOpt.NoContentLength)
+		err = sendAndRecover(destination, "text/plain", []byte(message), stomp.SendOpt.NoContentLength)
 		if err != nil {
-			fmt.Printf("[AMQ] ERROR happened: %s\n", err)
+			//fmt.Printf("[AMQ] ERROR happened: %s\n", err)
 			return err
 		}
 	}

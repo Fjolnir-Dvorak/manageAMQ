@@ -4,18 +4,20 @@
 
 // // +build ignore
 
-package main
+package ui
 
 import (
+	"bufio"
 	"fmt"
 	"github.com/Fjolnir-Dvorak/manageAMQ/queue"
 	ui "github.com/gizak/termui"
+	"os"
 )
 
 var (
 	list *queue.FileList
 	filenames []string
-	runner queue.ActiveRunner
+	runner *queue.ActiveRunner
 )
 
 const(
@@ -23,13 +25,13 @@ const(
 	fmtLineProcess = "Line %d / %d:"
 )
 
-func startUI(activeRunner queue.ActiveRunner) {
+func StartUI(activeRunner *queue.ActiveRunner) {
 	if err := ui.Init(); err != nil {
 		panic(err)
 	}
 	defer ui.Close()
 	runner = activeRunner
-	list = &runner.FileList
+	list = runner.FileList
 
 	nodes := make([]ui.Bufferer, 0, 5)
 
@@ -43,7 +45,7 @@ func startUI(activeRunner queue.ActiveRunner) {
 	fileListProgress.Y = helpQuit.Y + helpQuit.Height
 	nodes = append(nodes, fileListProgress)
 
-	currentFileProgress := createGauge(fmt.Sprintf(fmtLineProcess, list.Current().ReadingPosition, list.Current().TotalLines))
+	currentFileProgress := createGauge(fmt.Sprintf(fmtLineProcess, list.CurrentOrFirst().ReadingPosition, list.CurrentOrFirst().TotalLines))
 	currentFileProgress.Y = helpQuit.Y + helpQuit.Height
 	currentFileProgress.X = fileListProgress.X + fileListProgress.Width
 	nodes = append(nodes, currentFileProgress)
@@ -53,31 +55,78 @@ func startUI(activeRunner queue.ActiveRunner) {
 	nodes = append(nodes, listView)
 
 	draw := func() {
-		fileListProgress.Percent = list.CurrentFile / list.TotalFiles
-		fileListProgress.Label = fmt.Sprintf(FmtFileProcess, list.CurrentFile, list.TotalFiles)
+		fileListProgress.Percent = int((float64(list.CurrentFile) / float64(list.TotalFiles)) * 100.0)
+		fileListProgress.BorderLabel = fmt.Sprintf(FmtFileProcess, list.CurrentFile, list.TotalFiles)
 
-		currentFile := list.Files[list.CurrentFile]
-		currentFileProgress.Percent = currentFile.ReadingPosition / currentFile.TotalLines
-		currentFileProgress.Label = fmt.Sprintf(fmtLineProcess, list.Current().ReadingPosition, list.Current().TotalLines)
+		currentFile := list.CurrentOrFirst()
+		currentFileProgress.Percent = int((float64(currentFile.ReadingPosition) / float64(currentFile.TotalLines)) * 100.0)
+		currentFileProgress.BorderLabel = fmt.Sprintf(fmtLineProcess, currentFile.ReadingPosition, currentFile.TotalLines)
+
+		currentFileIndex := list.CurrentFile
+		if currentFileIndex > 0 {
+			currentFileIndex = currentFileIndex - 1
+		}
+		listView.Items = filenames[(currentFileIndex):]
 		ui.Render(nodes...)
 	}
 	ui.Handle("/sys/kbd/q", func(ui.Event) {
 		ui.StopLoop()
+		runner.Lock()
+		runner.Running = false
+		runner.Paused = false
+		runner.Unlock()
+		runner.Channel <- struct{}{}
+		runner.Waiter.Wait()
+		return
 	})
 	ui.Handle("/sys/kbd/<space>", func(ui.Event) {
 		runner.Lock()
-		runner.Running = !runner.Running
+		runner.Paused = !runner.Paused
 		runner.Unlock()
-		runner.Cond.Broadcast()
+		runner.Channel <- struct{}{}
 	})
 	ui.Handle("/timer/1s", func(e ui.Event) {
 		draw()
 	})
+
+	if !waitForUserInput() {
+		runner.Lock()
+		runner.Running = false
+		runner.Paused = false
+		runner.Unlock()
+		runner.Channel <- struct{}{}
+		runner.Waiter.Wait()
+		return
+	}
+
 	runner.Lock()
-	runner.Running = true
+	runner.Paused = false
 	runner.Unlock()
-	runner.Cond.Broadcast()
+	runner.Channel <- struct{}{}
 	ui.Loop()
+}
+
+func waitForUserInput() bool {
+	if true {
+		return true
+	}
+	fmt.Println("Weitermachen?")
+	reader := bufio.NewReader(os.Stdin)
+	input, _, err := reader.ReadRune()
+	if err != nil {
+		return false
+	}
+	switch input {
+	case 0x000A, 'y', 'Y':
+		fmt.Println("... yes")
+		return true
+	case 'a', 'A':
+		fmt.Println("... Aborting")
+		return false
+	default:
+		fmt.Println("... That was no valid character. Perhaps you meant to say No...")
+		return false
+	}
 }
 
 func createGauge(baseText string) *ui.Gauge{
@@ -102,15 +151,16 @@ func createTextBox(text string) *ui.Par {
 	return simpleText
 }
 func createFileListView(list *queue.FileList) *ui.List {
-	names := make([]string, list.TotalFiles)
+	names := make([]string, 0, list.TotalFiles)
 	for index, single := range list.Files {
 		names = append(names, fmt.Sprintf("[%d] %s", index + 1, single.ReprenstativeName))
 	}
 	filenames = names
 
 	listView := ui.NewList()
-	listView.Items = filenames[list.CurrentFile - 1:]
-	listView.ItemFgColor = ui.ColorYellow
+	listView.Items = filenames
+	listView.ItemFgColor = ui.ColorMagenta
+	listView.BorderLabelFg = ui.ColorBlue
 	listView.BorderLabel = "List"
 	listView.Height = 7
 	listView.Width = 50

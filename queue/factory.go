@@ -2,6 +2,7 @@ package queue
 
 import (
 	"errors"
+	"fmt"
 	"github.com/Fjolnir-Dvorak/manageAMQ/utils"
 	"io/ioutil"
 	"os"
@@ -31,11 +32,16 @@ func fileListToStruct(inputFiles []string) (*FileList, error) {
 			return factoryError(ErrNotOpened, filename)
 		}
 		lineCount, err := utils.CountLinesFromFile(file)
-		file.Close()
 		if err != nil {
+			file.Close()
 			return factoryError(ErrDunno, filename)
 		}
-		fi, _ := file.Stat()
+		fi, err := file.Stat()
+		if err != nil {
+			fmt.Println(err)
+			file.Close()
+			return factoryError(ErrDunno, filename)
+		}
 		singleFile := SingleFile{
 			FullPath:filename,
 			ReadingPosition:0,
@@ -43,10 +49,11 @@ func fileListToStruct(inputFiles []string) (*FileList, error) {
 			TotalLines:lineCount,
 		}
 		fileList = append(fileList, singleFile)
+		file.Close()
 	}
 	return &FileList{
 		Files:       fileList,
-		CurrentFile: 1,
+		CurrentFile: 0,
 		TotalFiles:  len(fileList),
 	}, nil
 }
